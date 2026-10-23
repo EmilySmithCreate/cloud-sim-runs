@@ -1,0 +1,120 @@
+# Submit every job listed in a queue file to AWS Batch when that file is pushed (cloud-sim-runs).
+#
+# A queue file lives under cloud/queue/ and holds one job per line, "<runner> <run>": scripts/<runner>.py run on
+# configs/<run>.json. Blank lines and lines starting with # are ignored. Pushing a commit that adds or changes a
+# queue file builds the image once from that commit and submits each line as one Batch job named
+# "<run>-<first 7 characters of the commit>". It does not wait for the jobs and commits nothing.
+#
+# Guards, each added after the mistake it prevents happened at least once:
+#   1. It never runs on main. Merging a branch into main carries queue files main has not seen, which a push
+#      trigger reads as new submissions.
+#   2. A run is skipped if its result is already in the bucket or a job for it is still unfinished. To run a config
+#      again on purpose, make a new config with a new name.
+#   3. Every runner and config named must exist, and the push may not submit more than SIM_MAX_JOBS_PER_PUSH jobs
+#      (default 200), before anything is built or billed.
+# Jobs submitted by mistake are cancelled with sim_cancel.yml.
+name: sim_queue
+
+on:
+  push:
+    branches-ignore: ["main"]
+    paths:
+      - "cloud/queue/**"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
+      NAME: ${{ vars.SIM_NAME || 'simruns' }}
+      MAX_JOBS: ${{ vars.SIM_MAX_JOBS_PER_PUSH || '200' }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: which queue files this push added or changed
+        run: |
+          BEFORE="${{ github.event.before }}"
+          if git rev-parse --verify --quiet "$BEFORE" >/dev/null && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            git diff --name-only "$BEFORE" "$GITHUB_SHA" -- cloud/queue > changed.txt
+          else
+            git show --name-only --pretty="" "$GITHUB_SHA" -- cloud/queue > changed.txt
+          fi
+          : > jobs.txt
+          while read -r f; do
+            case "$f" in *.txt) ;; *) continue ;; esac
+            [ -f "$f" ] || continue
+            echo "queue file: $f"
+            # tr: a queue file saved on Windows ends its lines in CR LF, which would cling to the run name.
+            tr -d '\r' < "$f" | grep -v '^\s*#' | grep -v '^\s*$' >> jobs.txt || true
+          done < changed.txt
+          test -s jobs.txt || { echo "no jobs in the changed queue files"; exit 1; }
+
+      - name: every runner and config must exist, before anything is billed
+        run: |
+          test -n "$ACCOUNT" || { echo "set the repository variable AWS_ACCOUNT_ID"; exit 1; }
+          N=$(wc -l < jobs.txt)
+          [ "$N" -le "$MAX_JOBS" ] || { echo "$N jobs is more than SIM_MAX_JOBS_PER_PUSH=$MAX_JOBS"; exit 1; }
+          while read -r RUNNER RUN EXTRA; do
+            [ -z "$EXTRA" ] || { echo "one '<runner> <run>' per line: $RUNNER $RUN $EXTRA"; exit 1; }
+            echo "$RUNNER" | grep -Eq '^[A-Za-z0-9_-]+$' || { echo "bad runner name: $RUNNER"; exit 1; }
+            echo "$RUN" | grep -Eq '^[A-Za-z0-9_-]{1,120}$' || { echo "bad run name: $RUN"; exit 1; }
+            [ -f "scripts/${RUNNER}.py" ] || [ -x "scripts/${RUNNER}" ] || { echo "no such runner: $RUNNER"; exit 1; }
+            [ -f "configs/${RUN}.json" ] || { echo "no such config: configs/${RUN}.json"; exit 1; }
+          done < jobs.txt
+          echo "$N jobs checked"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/${{ env.NAME }}-github
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      - name: build and push the image from this commit
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/$NAME"
+          docker build -f infra/cloud-sim/Dockerfile --build-arg GIT_SHA="$GITHUB_SHA" \
+            -t "$IMAGE:latest" -t "$IMAGE:${GITHUB_SHA::12}" .
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:${GITHUB_SHA::12}"
+
+      - name: submit one job per line
+        run: |
+          BUCKET="$NAME-results-$ACCOUNT"
+          echo "### submitted from \`${GITHUB_SHA::7}\`" >> "$GITHUB_STEP_SUMMARY"
+          for S in SUBMITTED PENDING RUNNABLE STARTING RUNNING; do
+            aws batch list-jobs --job-queue "$NAME" --job-status $S --query "jobSummaryList[].jobName" --output text
+          done | tr '\t' '\n' > active_jobs.txt
+          SUBMITTED=0
+          while read -r RUNNER RUN; do
+            if aws s3 ls "s3://$BUCKET/runs/$RUN/_run.json" < /dev/null > /dev/null 2>&1; then
+              echo "- skipped \`$RUN\`: its result is already in the bucket" | tee -a "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            if grep -Eq "^${RUN}-[0-9a-f]{7}$" active_jobs.txt; then
+              echo "- skipped \`$RUN\`: a job for it is still unfinished" | tee -a "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            ID=$(aws batch submit-job \
+              --job-name "${RUN}-${GITHUB_SHA::7}" \
+              --job-queue "$NAME" \
+              --job-definition "$NAME-run" \
+              --parameters runner="$RUNNER",run="$RUN",commit="${GITHUB_SHA::7}" \
+              --query jobId --output text < /dev/null)
+            echo "- \`$RUNNER\` on \`$RUN\`: job \`$ID\`" | tee -a "$GITHUB_STEP_SUMMARY"
+            SUBMITTED=$((SUBMITTED + 1))
+          done < jobs.txt
+          echo "**$SUBMITTED jobs submitted.** Results land under \`s3://$BUCKET/runs/<run>/\`." >> "$GITHUB_STEP_SUMMARY"

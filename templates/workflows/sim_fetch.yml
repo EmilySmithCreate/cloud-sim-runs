@@ -1,0 +1,86 @@
+# Copy finished runs from the results bucket into cloud/inbox/ on this branch (cloud-sim-runs).
+#
+# Trigger: push a change to cloud/fetch/request.txt, one run name or shell pattern per line (sweep_a_* is fine;
+# blank lines and # comments ignored), or dispatch by hand. Each finished run whose name matches, and which is not
+# already in results/ or cloud/inbox/, is copied to cloud/inbox/<run>/ and committed. Scratch under partial/ is
+# never fetched. It never writes to results/: a fetched run becomes a result only when accept_runs.py has checked
+# it against its committed config and someone has committed the move.
+name: sim_fetch
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+    paths:
+      - "cloud/fetch/request.txt"
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
+      NAME: ${{ vars.SIM_NAME || 'simruns' }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/${{ env.NAME }}-github
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 1800
+
+      - name: copy the requested runs into cloud/inbox/
+        run: |
+          set -eu
+          BUCKET="s3://$NAME-results-$ACCOUNT"
+          aws s3 ls "$BUCKET/runs/" | awk '$1 == "PRE" {sub("/$", "", $2); print $2}' > /tmp/runs.txt || true
+          sed 's/#.*//; s/[[:space:]]*$//; s/^[[:space:]]*//' cloud/fetch/request.txt | grep -v '^$' > /tmp/wanted.txt || true
+          : > /tmp/fetch.txt
+          while read -r run; do
+            [ -e "results/$run" ] && continue
+            [ -e "cloud/inbox/$run" ] && continue
+            while read -r pat; do
+              case "$run" in $pat) echo "$run" >> /tmp/fetch.txt; break ;; esac
+            done < /tmp/wanted.txt
+          done < /tmp/runs.txt
+          echo "to fetch: $(wc -l < /tmp/fetch.txt) runs"
+          mkdir -p cloud/inbox
+          : > /tmp/problems.txt
+          while read -r run; do
+            aws s3 cp --recursive --only-show-errors "$BUCKET/runs/$run/" "cloud/inbox/$run/" < /dev/null
+            [ -f "cloud/inbox/$run/_run.json" ] || echo "INCOMPLETE $run: no _run.json (the upload may still be running)" >> /tmp/problems.txt
+          done < /tmp/fetch.txt
+          # GitHub refuses files over 100 MB; stop rather than push half a run.
+          if find cloud/inbox -type f -size +95M | grep -q .; then
+            find cloud/inbox -type f -size +95M
+            echo "a fetched file is over 95 MB; download it by hand" >&2
+            exit 1
+          fi
+          {
+            echo "# Fetched from the results bucket, $(date -u +'%Y-%m-%d %H:%M UTC') (commit ${GITHUB_SHA::7})"
+            echo
+            echo "Unchecked. Run \`python infra/cloud-sim/accept_runs.py\` before treating any of these as results."
+            echo
+            while read -r run; do
+              echo "- $run  ($(find "cloud/inbox/$run" -type f | wc -l) files, $(du -sh "cloud/inbox/$run" | cut -f1))"
+            done < /tmp/fetch.txt
+            if [ -s /tmp/problems.txt ]; then echo; echo "## Problems"; sed 's/^/- /' /tmp/problems.txt; fi
+          } > cloud/inbox/FETCHED.md
+          cat cloud/inbox/FETCHED.md
+
+      - name: commit the inbox
+        run: |
+          git config user.name "sim_fetch workflow"
+          git config user.email "actions@users.noreply.github.com"
+          git add cloud/inbox
+          if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
+          git commit -m "fetched cloud runs into cloud/inbox/ (unchecked) [skip ci]"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

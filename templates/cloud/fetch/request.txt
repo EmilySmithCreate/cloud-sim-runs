@@ -1,0 +1,1 @@
+# One run name or shell pattern per line (sweep_a_* is fine). Push to fetch matching finished runs into cloud/inbox/.

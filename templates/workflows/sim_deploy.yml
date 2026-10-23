@@ -1,0 +1,69 @@
+# Terraform for the cloud-sim-runs stack: started by hand only, dry run by default. GitHub signs in to the account
+# with OIDC; nothing account-specific is stored in the repository.
+name: sim_deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "dry-run plans and stops; deploy applies"
+        type: choice
+        options: [dry-run, deploy]
+        default: dry-run
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      NAME: ${{ vars.SIM_NAME || 'simruns' }}
+      TF_VAR_aws_account_id: ${{ vars.AWS_ACCOUNT_ID }}
+      TF_VAR_name: ${{ vars.SIM_NAME || 'simruns' }}
+      TF_VAR_region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      TF_VAR_budget_email: ${{ vars.SIM_BUDGET_EMAIL || '' }}
+      TF_VAR_monthly_budget_usd: ${{ vars.SIM_MONTHLY_BUDGET_USD || '25' }}
+
+    defaults:
+      run:
+        working-directory: infra/cloud-sim
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: the account must be set, before anything is assumed
+        run: test -n "$TF_VAR_aws_account_id" || { echo "set the repository variable AWS_ACCOUNT_ID"; exit 1; }
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/${{ env.NAME }}-github
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 3600
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: init
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=$NAME-tfstate-$TF_VAR_aws_account_id" \
+            -backend-config="region=$AWS_REGION" \
+            -backend-config="dynamodb_table=$NAME-tf-locks"
+
+      - name: validate
+        run: terraform validate
+
+      - name: plan
+        run: terraform plan -input=false -out=sim.tfplan
+
+      - name: show the plan
+        run: terraform show -no-color sim.tfplan
+
+      - name: apply
+        if: ${{ inputs.action == 'deploy' }}
+        run: terraform apply -input=false -auto-approve sim.tfplan

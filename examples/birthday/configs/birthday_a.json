@@ -1,0 +1,7 @@
+{
+  "_purpose": "Example: the birthday problem for rooms of 2 to 20 people, checked against the exact answer.",
+  "people_from": 2,
+  "people_to": 20,
+  "trials": 50000,
+  "seed": 1001
+}

@@ -1,0 +1,5 @@
+# Example batch: the birthday problem in three independent jobs, each a range of room sizes with its own seed.
+# Expected: about 0.507 at 23 people, within about 0.007 (three standard errors) of the exact value at every size.
+birthday birthday_a
+birthday birthday_b
+birthday birthday_c

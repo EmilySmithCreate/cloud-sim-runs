@@ -1,0 +1,81 @@
+# Write the state of the Batch queue and the results bucket into the repository, so that a session without AWS
+# credentials can see what is running and what has finished (cloud-sim-runs).
+#
+# Trigger: push a change to cloud/status/request.txt (any text; the current time is fine), or dispatch by hand. It
+# writes cloud/status/latest.md and commits it back to the same branch. It only reads: it moves no result.
+name: sim_status
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+    paths:
+      - "cloud/status/request.txt"
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
+      NAME: ${{ vars.SIM_NAME || 'simruns' }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/${{ env.NAME }}-github
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 900
+
+      - name: list the queue and the bucket
+        run: |
+          mkdir -p cloud/status
+          for S in RUNNING RUNNABLE STARTING SUBMITTED PENDING SUCCEEDED FAILED; do
+            aws batch list-jobs --job-queue "$NAME" --job-status $S --max-items 200 \
+              --query "jobSummaryList[].[jobName, createdAt, startedAt, stoppedAt, statusReason]" --output json \
+              > "jobs_$S.json"
+          done
+          aws s3 ls "s3://$NAME-results-$ACCOUNT/runs/" | awk '$1 == "PRE" {sub("/$", "", $2); print $2}' > runs.txt || true
+          aws s3 ls "s3://$NAME-results-$ACCOUNT/partial/" | awk '$1 == "PRE" {sub("/$", "", $2); print $2}' > partial.txt || true
+          python3 - <<'PY'
+          import json, os, datetime as dt
+          def t(ms):
+              return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).strftime("%m-%d %H:%M") if ms else ""
+          now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+          lines = ["# Cloud runs as of %s (commit %s)" % (now, os.environ["GITHUB_SHA"][:7]), "",
+                   "Written by the sim_status workflow; read only.", ""]
+          for s in ["RUNNING", "RUNNABLE", "STARTING", "SUBMITTED", "PENDING", "SUCCEEDED", "FAILED"]:
+              jobs = json.load(open("jobs_%s.json" % s)) or []
+              lines.append("## %s (%d%s)" % (s, len(jobs), "+" if len(jobs) >= 200 else ""))
+              for name, c, st, sp, reason in jobs:
+                  extra = "  (%s)" % reason if s == "FAILED" and reason else ""
+                  lines.append("- %s  created %s  started %s  stopped %s%s" % (name, t(c), t(st), t(sp), extra))
+              if not jobs:
+                  lines.append("- none")
+              lines.append("")
+          for title, path in [("finished runs in the bucket (runs/)", "runs.txt"),
+                              ("scratch from runs that stopped early (partial/)", "partial.txt")]:
+              names = [n.strip() for n in open(path) if n.strip()]
+              lines.append("## %s (%d)" % (title, len(names)))
+              lines += ["- " + n for n in names] or ["- none"]
+              lines.append("")
+          open("cloud/status/latest.md", "w").write("\n".join(lines))
+          print("\n".join(lines))
+          PY
+
+      - name: commit the status file
+        run: |
+          git config user.name "sim_status workflow"
+          git config user.email "actions@users.noreply.github.com"
+          git add cloud/status/latest.md
+          if git diff --cached --quiet; then echo "no change"; exit 0; fi
+          git commit -m "cloud status as of $(date -u +'%Y-%m-%d %H:%M UTC') (read only) [skip ci]"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

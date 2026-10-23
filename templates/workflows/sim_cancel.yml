@@ -1,0 +1,86 @@
+# Cancel Batch jobs by the commit that submitted them (cloud-sim-runs).
+#
+# Every job sim_queue submits is named "<run>-<first 7 characters of the commit>". A cancel file under cloud/cancel/
+# holds one such commit prefix per line (blank lines and # comments ignored). Pushing a commit that adds or changes
+# a cancel file stops every unfinished job whose name ends in "-<prefix>". Finished jobs and results are left alone;
+# a job stopped while running saves its scratch to partial/, which the bucket expires.
+#
+# Push-triggered so that it works from any branch, and from a phone: edit a file in the GitHub app or on github.com.
+name: sim_cancel
+
+on:
+  workflow_dispatch:
+    inputs:
+      prefix:
+        description: "commit prefix (7 characters) of the submission to cancel"
+        required: true
+  push:
+    branches: ["**"]
+    paths:
+      - "cloud/cancel/**"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      NAME: ${{ vars.SIM_NAME || 'simruns' }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: which commit prefixes to cancel
+        id: prefixes
+        env:
+          INPUT_PREFIX: ${{ inputs.prefix }}
+        run: |
+          if [ -n "$INPUT_PREFIX" ]; then
+            P="$INPUT_PREFIX"
+          else
+            BEFORE="${{ github.event.before }}"
+            if git rev-parse --verify --quiet "$BEFORE" >/dev/null && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+              FILES=$(git diff --name-only "$BEFORE" "$GITHUB_SHA" -- cloud/cancel)
+            else
+              FILES=$(git show --name-only --pretty="" "$GITHUB_SHA" -- cloud/cancel)
+            fi
+            P=$(for f in $FILES; do [ -f "$f" ] && cat "$f"; done | tr -d '\r' | grep -v '^\s*#' | grep -v '^\s*$' | sort -u)
+          fi
+          # A prefix must look like a commit prefix, so that a stray word cannot match job names it was not meant to.
+          for p in $P; do echo "$p" | grep -Eq '^[0-9a-f]{7}$' || { echo "not a 7-character commit prefix: $p"; exit 1; }; done
+          test -n "$P"
+          echo "prefixes=$(echo $P)" >> "$GITHUB_OUTPUT"
+          echo "cancelling jobs from: $P"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/${{ env.NAME }}-github
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 1800
+
+      - name: stop every unfinished job from those commits
+        env:
+          PREFIXES: ${{ steps.prefixes.outputs.prefixes }}
+        run: |
+          echo "### sim_cancel" >> "$GITHUB_STEP_SUMMARY"
+          TOTAL=0
+          for P in $PREFIXES; do
+            for S in SUBMITTED PENDING RUNNABLE STARTING RUNNING; do
+              aws batch list-jobs --job-queue "$NAME" --job-status $S \
+                --query "jobSummaryList[].[jobId, jobName]" --output text \
+                | awk -v p="-$P" 'length($2) > length(p) && substr($2, length($2) - length(p) + 1) == p' \
+                > jobs.txt || true
+              while read -r ID JOBNAME; do
+                aws batch terminate-job --job-id "$ID" --reason "cancelled by sim_cancel (commit $P)" < /dev/null > /dev/null
+                echo "- $JOBNAME ($S)" | tee -a "$GITHUB_STEP_SUMMARY"
+                TOTAL=$((TOTAL + 1))
+              done < jobs.txt
+            done
+          done
+          echo "**$TOTAL jobs stopped.**" | tee -a "$GITHUB_STEP_SUMMARY"
