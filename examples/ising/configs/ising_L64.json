@@ -1,0 +1,30 @@
+{
+  "_purpose": "Example: the 2D Ising model on a 64 x 64 grid, 1.5 <= T <= 3.5, compared with Onsager's exact answer. One grid size per job; together the four sizes show the change sharpening as the grid grows.",
+  "size": 64,
+  "temperatures": [
+    1.5,
+    1.6,
+    1.7,
+    1.8,
+    1.9,
+    2.0,
+    2.1,
+    2.2,
+    2.3,
+    2.4,
+    2.5,
+    2.6,
+    2.7,
+    2.8,
+    2.9,
+    3.0,
+    3.1,
+    3.2,
+    3.3,
+    3.4,
+    3.5
+  ],
+  "warmup_sweeps": 1000,
+  "sweeps": 5000,
+  "seed": 2026104
+}

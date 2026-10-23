@@ -96,16 +96,17 @@ tab with that branch selected.
 
 ## 7. Try the example
 
-Copy `examples/birthday/` into the repository (its `scripts/`, `configs/` and `cloud/queue/` files go into the
+Copy `examples/ising/` into the repository (its `scripts/`, `configs/` and `cloud/queue/` files go into the
 folders of the same names), then:
 
-1. Run it locally: `python scripts/birthday.py configs/birthday_a.json`, and read `results/birthday_a/`.
+1. Run the smallest job locally, `python scripts/ising.py configs/ising_L8.json` (a few seconds), and read
+   `results/ising_L8/ising.csv`.
 2. On a branch that is not `main`, commit the example and push.
-3. Follow SKILL.md: check status, fetch `birthday_*`, accept.
+3. Follow SKILL.md: check status, fetch `ising_*`, accept.
+4. Compare the four sizes with the expectations in `examples/ising/README.md`.
 
-The answer is known exactly (23 people give a shared birthday just over half the time), so the example checks the
-whole loop against a number nobody has to trust. The three jobs cost well under a cent. Most of their time is
-Fargate starting the container.
+The model is the 2D Ising model, solved exactly by Onsager, so the example checks the whole loop against numbers
+nobody has to trust. The four jobs together cost about a penny.
 
 ## Taking it down
 

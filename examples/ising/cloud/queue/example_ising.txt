@@ -1,0 +1,7 @@
+# Example batch: the 2D Ising model, one grid size per job (8x8, 16x16, 32x32, 64x64), compared with Onsager's
+# exact solution of 1944. Expected: far below the critical temperature 2.269, |m| within about 0.01 of the exact
+# value at every size; the drop near 2.269 gets steeper as the grid grows.
+ising ising_L8
+ising ising_L16
+ising ising_L32
+ising ising_L64

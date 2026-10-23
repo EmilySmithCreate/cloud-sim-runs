@@ -30,9 +30,12 @@ agents, point them at `SKILL.md` and ask them to follow it.
 2. Ask: *"Set up cloud-sim-runs in this repo."* The agent copies the templates and walks you through the one-time
    AWS steps ([reference/setup.md](reference/setup.md)): about 20 minutes, one script pasted into AWS CloudShell,
    and your approval before anything is created.
-3. Ask: *"Run the birthday example in the cloud."* Three jobs simulate how many people a room needs before two
-   probably share a birthday. The exact answer is known (23 people, just over half the time), so you can check the
-   whole loop against a number you don't have to take on trust. Cost: well under a cent.
+3. Ask: *"Run the Ising example in the cloud."* It's the simplest form of the question my physics project asks:
+   when one arrangement turns into another, how sharp is the change? (More on that below.) Four jobs each simulate
+   a grid of tiny magnets, one grid size per job. The magnets line up when cold and scramble when hot. Lars Onsager
+   solved this model exactly in 1944: order appears below a temperature of 2.269, in a known amount. So you can
+   check the whole loop against numbers you don't have to take on trust, and watch the change get sharper as the
+   grid grows. Cost: about a penny. ([What to expect](examples/ising/README.md).)
 4. Then point it at your own question.
 
 You need a GitHub repository, an AWS account you control, and the `gh` command-line tool. Docker and Terraform run
