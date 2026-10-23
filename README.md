@@ -49,7 +49,7 @@ on a published one. Each question below took dozens of independent runs, each la
 predictions failed, and the repository records those failures as prominently as the successes.
 
 - **Can I reproduce a published simulation?** My engine matched one published curve from the model's authors to
-  within half a percent. It also showed that two published figures from the same group disagree with each other.
+  within half a percent. It also showed that two published figures from the same group disagree with each other. I've had great engagement with the model's author.
 - **When a curled-up network opens into a flat one, is the change sudden, and how much energy does it give off?**
   In the two-dimensional toy, yes: a curled tube lasts thousands of steps, then opens from one spot within a few
   hundred, and gives off exactly the energy calculated in advance.
